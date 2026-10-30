@@ -108,15 +108,24 @@ class ApiError(ToolError):
 
 async def _get(path: str, **params) -> dict:
     """GET /v1{path} as the connected person. Errors come back as messages the assistant can relay."""
+    return await _call("GET", path, params=params)
+
+
+async def _post(path: str, body: dict) -> dict:
+    """POST /v1{path} (NIL contributions) as the connected person."""
+    return await _call("POST", path, json={k: v for k, v in body.items() if v is not None})
+
+
+async def _call(method: str, path: str, params: dict | None = None, json: dict | None = None) -> dict:
     token = get_access_token()
     hit = _exchanged.get(_key(token.token)) if token else None
     if not hit:
         raise ApiError("Not signed in. Reconnect Assistant GM in your assistant's settings.")
-    query = {k: v for k, v in params.items() if v is not None}
+    query = {k: v for k, v in (params or {}).items() if v is not None}
     try:
-        r = await _http.get("/v1" + path, params=query, headers={"Authorization": "Bearer " + hit.api_token})
+        r = await _http.request(method, "/v1" + path, params=query, json=json, headers={"Authorization": "Bearer " + hit.api_token})
     except httpx.HTTPError:
-        log.exception("GET /v1%s failed", path)
+        log.exception("%s /v1%s failed", method, path)
         raise ApiError("Assistant GM is unavailable right now. Try again shortly.")
     if r.status_code == 200:
         return r.json()
@@ -143,7 +152,8 @@ mcp = MCPServer(
     website_url="https://portal.tbscouting.com",
     instructions="""\
 Assistant GM is Travis Branham Scouting Service's college basketball scouting portal. These tools read it
-as the person who connected it, limited to what their account allows. Everything is read-only.
+as the person who connected it, limited to what their account allows. Everything is read-only except
+the two NIL contribution tools.
 
 - College players: search_players, then get_player / get_player_stats / get_player_scores / get_player_nil
   with a search result's id as player_id. transfer_portal lists the transfer board.
@@ -151,7 +161,15 @@ as the person who connected it, limited to what their account allows. Everything
 - High school prospects (classes 2026-2030): search_hs_prospects, get_hs_prospect, get_hs_performances.
   For prospects, the scouts' performance grades and notes matter far more than box-score stats.
 - GM score is the portal's headline rating. Levels: HM = high major, MM = mid major, LM = low major.
-- NIL figures are estimates, each labelled with its source. Present them as estimates, never as facts.
+- NIL figures are estimates, each labelled expert or model (with the model version), the NIL season and
+  when it was estimated. Present them as estimates, never as facts, and say when they're from: they
+  change as new information comes in.
+- NIL access: the team's own roster (get_team_nil) with the basic NIL permission; any player, history and
+  the whole-market export (list_nil_estimates, 200 per page) with the nil:market upgrade. For a long list,
+  page through list_nil_estimates rather than calling get_player_nil per player.
+- submit_nil_estimate and report_nil_deal send the person's own information to TB Scouting for review.
+  Only use them when the person asks you to, with figures they gave you; confirm the player and amount
+  first. Never submit figures you inferred or made up.
 - If a tool says a scope is missing or the connection is gone, tell the person; don't retry in a loop.""",
     token_verifier=ExchangeVerifier(),
     auth=AuthSettings(issuer_url=ISSUER, resource_server_url=PUBLIC_URL + "/mcp",
@@ -208,8 +226,86 @@ async def get_player_scores(player_id: int) -> dict:
 
 @mcp.tool(annotations=READ)
 async def get_player_nil(player_id: int) -> dict:
-    """A college player's NIL estimates, each labelled with its source and model. These are estimates."""
+    """A college player's current NIL estimate: kind (expert or model, with model version), NIL season,
+    low/mid/high US dollars per year, and when it was first estimated. Players on the account's own
+    roster need the basic NIL permission; anyone else needs the nil:market upgrade."""
     return await _get(f"/players/{player_id}/nil")
+
+
+@mcp.tool(annotations=READ)
+async def get_player_nil_history(player_id: int) -> dict:
+    """How a college player's NIL estimate has changed over time, oldest first, with when each figure
+    applied (estimated_since → replaced_at)."""
+    return await _get(f"/players/{player_id}/nil/history")
+
+
+@mcp.tool(annotations=READ)
+async def get_team_nil() -> dict:
+    """The current NIL estimate for every player on the account's own team roster."""
+    return await _get("/team/nil")
+
+
+@mcp.tool(annotations=READ)
+async def list_nil_estimates(
+    season: str | None = None,
+    kind: Literal["expert", "model"] | None = None,
+    team: str | None = None,
+    conference: str | None = None,
+    position: Position | None = None,
+    status: Literal["active", "portal", "committed", "prospect", "withdrawn"] | None = None,
+    min_mid: int | None = None,
+    max_mid: int | None = None,
+    sort: Literal["mid", "name", "changed"] = "mid",
+    as_of: str | None = None,
+    changed_since: str | None = None,
+    page: int = 1,
+    per_page: int = 200,
+) -> dict:
+    """NIL estimates for every college player (needs the nil:market upgrade), up to 200 per page, highest
+    first. season = NIL season like "2026-27"; conference = "HM", "MM", "LM" or a conference name;
+    min_mid/max_mid in US dollars. as_of (ISO 8601 UTC, e.g. "2026-10-01T00:00:00Z") exports a past moment;
+    changed_since returns only figures that changed since then. The response's as_of says when the data is from."""
+    return await _get("/nil", season=season, kind=kind, team=team, conference=conference, position=position,
+                      status=status, min_mid=min_mid, max_mid=max_mid, sort=sort, as_of=as_of,
+                      changed_since=changed_since, page=page, per_page=per_page)
+
+
+WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+
+
+@mcp.tool(annotations=WRITE)
+async def submit_nil_estimate(player_id: int, amount: int) -> dict:
+    """Submit the person's own estimate of a college player's NIL value, in US dollars per year, as a
+    Coach's Market vote for the current NIL season. One per player per season; submitting again replaces
+    it. TB Scouting reviews it before it counts. Only when the person asks, with their figure."""
+    return await _post(f"/players/{player_id}/nil/votes", {"amount": amount})
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
+async def report_nil_deal(
+    player_id: int,
+    amount: int,
+    kind: Literal["deal", "agent_ask"] = "deal",
+    basis: Literal["per_year", "total"] = "per_year",
+    years: int | None = None,
+    amount_high: int | None = None,
+    season: str | None = None,
+    source: str | None = None,
+    source_url: str | None = None,
+    note: str | None = None,
+) -> dict:
+    """Report a NIL deal (or an agent's ask) the person knows about for a college player, in US dollars.
+    basis "total" needs years. amount_high for a stated range. source / source_url: where it comes from.
+    TB Scouting reviews it before it counts. Only when the person asks, with their information."""
+    return await _post(f"/players/{player_id}/nil/reports", {
+        "amount": amount, "kind": kind, "basis": basis, "years": years, "amount_high": amount_high,
+        "season": season, "source": source, "source_url": source_url, "note": note})
+
+
+@mcp.tool(annotations=READ)
+async def my_nil_contributions() -> dict:
+    """The person's NIL estimates (Coach's Market votes) and reported deals, with their review status."""
+    return await _get("/nil/contributions")
 
 
 @mcp.tool(annotations=READ)
