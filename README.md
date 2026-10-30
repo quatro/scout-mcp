@@ -18,7 +18,7 @@ Connector URL: **https://mcp.tbscouting.com/mcp**
 - **Limits.** The same as `/v1`: the connection's scopes, the account's API access, and 60 requests a
   minute per connection. Removing the connection under Connected apps stops both tokens.
 
-Tools: `whoami`, `search_players`, `get_player`, `get_player_stats`,
+Tools: `whoami`, `screen_players`, `search_players`, `get_player`, `get_player_stats`,
 `get_player_scores`, `get_player_nil`, `transfer_portal`, `my_team`, `my_roster`,
 `my_team_history`, `search_hs_prospects`, `get_hs_prospect`, `get_hs_performances`, `get_team_nil`,
 `get_player_nil_history`, `list_nil_estimates` (read-only), and `submit_nil_estimate`, `report_nil_deal`,

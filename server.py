@@ -155,6 +155,12 @@ Assistant GM is Travis Branham Scouting Service's college basketball scouting po
 as the person who connected it, limited to what their account allows. Everything is read-only except
 the two NIL contribution tools.
 
+- To find players by stats, eligibility or NIL ("a guard for next year who shoots 40% from three, top 5 by
+  NIL"), use screen_players: one call, not a search followed by per-player lookups. "Next year" is
+  for_season="next" (the server applies the recruiting calendar). With a percentage filter always add a
+  volume minimum (e.g. min three_pa 3, or games 15), and say which stats season the numbers are from.
+  For a future season the list is players projected to have eligibility, not confirmed returners: NBA and
+  transfer decisions come later (from around January). Pass on the response's eligibility_note.
 - College players: search_players, then get_player / get_player_stats / get_player_scores / get_player_nil
   with a search result's id as player_id. transfer_portal lists the transfer board.
 - The account's own team: my_team, my_roster, my_team_history.
@@ -204,6 +210,34 @@ async def search_players(
     Each result's id is the player_id the other player tools take."""
     return await _get("/players", q=q, team=team, conference=conference, position=position, class_year=class_year,
                       status=status, sort=sort, page=page, per_page=per_page)
+
+
+@mcp.tool(annotations=READ)
+async def screen_players(
+    position: Position | None = None,
+    for_season: str | None = None,
+    status: Literal["active", "portal", "committed", "prospect", "withdrawn", "available"] | None = None,
+    conference: str | None = None,
+    team: str | None = None,
+    class_year: Literal["FR", "SO", "JR", "SR", "GR"] | None = None,
+    min: dict[str, float] | None = None,
+    max: dict[str, float] | None = None,
+    sort: str = "gm_score",
+    order: Literal["desc", "asc"] | None = None,
+    page: int = 1,
+    per_page: int = 25,
+) -> dict:
+    """Find college players by stats, eligibility and NIL in one call, with each player's latest-season
+    stats, projected class and NIL estimate (as the account allows).
+    for_season: "next" (players projected to have eligibility then, still in college), "current", or "2027-28".
+    status "available" = in the transfer portal, uncommitted. conference: "HM", "MM", "LM" or a name.
+    min / max: stat bounds, e.g. min={"three_pct": 40, "three_pa": 3}. Stats: games, mpg, ppg, rpg, apg,
+    spg, bpg, tov, fg_pct, three_pct, three_pa, ft_pct, efg_pct, ts_pct, usg_pct, ast_pct, trb_pct, bpm, per.
+    Shooting percentages take 40 or 0.40. sort: "nil" (needs the nil:market upgrade), "gm_score",
+    "scout_score", "name", or any stat; order defaults to desc (asc for name). per_page up to 100."""
+    bounds = {f"min_{k}": v for k, v in (min or {}).items()} | {f"max_{k}": v for k, v in (max or {}).items()}
+    return await _get("/screen", position=position, for_season=for_season, status=status, conference=conference,
+                      team=team, class_year=class_year, sort=sort, order=order, page=page, per_page=per_page, **bounds)
 
 
 @mcp.tool(annotations=READ)
